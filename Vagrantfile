@@ -9,6 +9,7 @@ Vagrant.configure("2") do |config|
     controller.vm.hostname = "controller"
     controller.vm.network "private_network", ip: "192.168.10.10"
     controller.vm.provision "shell", path: "scripts/setup_controller.sh"
+    controller.vm.provision "shell", path: "scripts/start_ryu.sh", privileged: false
   end
 
   # Routeur 1

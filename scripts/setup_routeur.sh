@@ -1,21 +1,29 @@
 #!/bin/bash
 
-# Activer IP forwarding
-sudo sysctl -w net.ipv4.ip_forward=1
+# Installation des paquets nécessaires
+apt-get update && apt-get install -y frr frr-pythontools openvswitch-switch
 
-# Installer FRR et Open vSwitch
-sudo apt-get update
-sudo apt-get install -y frr openvswitch-switch
-
-
-# Démarrer et configurer FRR avec OSPF
+# Configuration OSPF via FRR
 cat <<EOF > /etc/frr/frr.conf
+!
+hostname r1
 !
 router ospf
  network 192.168.10.0/24 area 0
  network 192.168.20.0/24 area 0
- network 192.168.30.0/24 area 0
 !
+line vty
 EOF
 
-sudo systemctl restart frr
+# Redémarrage du service FRR
+systemctl restart frr
+systemctl enable frr
+
+# Configuration Open vSwitch
+ovs-vsctl add-br br0
+ovs-vsctl add-port br0 eth1  # vers net-core
+ovs-vsctl add-port br0 eth2  # vers net-clientA
+ovs-vsctl set-controller br0 tcp:192.168.10.10:6633
+
+# Activation IP forwarding
+sysctl -w net.ipv4.ip_forward=1
