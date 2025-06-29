@@ -1,52 +1,102 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
 Vagrant.configure("2") do |config|
-  config.vm.provider "virtualbox" do |vb|
-    vb.memory = "1024"
-  end
+  # Configuration globale
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.box_check_update = false
+  
+  # Réseau de management
+  MGMT_NETWORK = "192.168.100"
+  # Réseau de données
+  DATA_NETWORK = "10.0"
 
-  # Contrôleur SDN (Ryu)
+  # VM Contrôleur SDN (Ryu)
   config.vm.define "controller" do |controller|
-    controller.vm.box = "ubuntu/bionic64"
-    controller.vm.hostname = "controller"
-    controller.vm.network "private_network", ip: "192.168.10.10"
-    controller.vm.provision "shell", path: "scripts/setup_controller.sh"
-    controller.vm.provision "shell", path: "scripts/start_ryu.sh", privileged: false
+    controller.vm.hostname = "sdn-controller"
+    controller.vm.network "private_network", ip: "#{MGMT_NETWORK}.10"
+    controller.vm.network "private_network", ip: "#{DATA_NETWORK}.1.10"
+    
+    # Port forwarding pour accès depuis la machine physique
+    controller.vm.network "forwarded_port", guest: 9090, host: 9090, host_ip: "0.0.0.0"  # Prometheus
+    controller.vm.network "forwarded_port", guest: 3000, host: 3000, host_ip: "0.0.0.0"  # Grafana
+    controller.vm.network "forwarded_port", guest: 8080, host: 8080, host_ip: "0.0.0.0"  # Ryu REST API
+    controller.vm.network "forwarded_port", guest: 6633, host: 6633, host_ip: "0.0.0.0"  # OpenFlow
+    
+    controller.vm.provider "virtualbox" do |vb|
+      vb.name = "SDN-Controller"
+      vb.memory = "2048"
+      vb.cpus = 2
+    end
+  
+    controller.vm.provision "shell", path: "scripts/install-controller.sh"
   end
 
-  # Routeur 1
-  config.vm.define "r1" do |r1|
-    r1.vm.box = "ubuntu/bionic64"
-    r1.vm.hostname = "r1"
-    # Interface cœur réseau
-    r1.vm.network "private_network", ip: "192.168.10.11", virtualbox__intnet: "net-core"
-    # Interface clientA
-    r1.vm.network "private_network", ip: "192.168.20.1", virtualbox__intnet: "net-clientA"
-    r1.vm.provision "shell", path: "scripts/setup_routeur.sh"
+  # VM Routeur 1 (FRRouting + OVS)
+  config.vm.define "router1" do |router1|
+    router1.vm.hostname = "router1"
+    router1.vm.network "private_network", ip: "#{MGMT_NETWORK}.11"
+    router1.vm.network "private_network", ip: "#{DATA_NETWORK}.1.1"
+    router1.vm.network "private_network", ip: "#{DATA_NETWORK}.2.1"
+    
+    router1.vm.provider "virtualbox" do |vb|
+      vb.name = "Router-1"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+    
+    router1.vm.provision "shell", path: "scripts/install-router.sh"
   end
 
-  # Routeur 2
-  config.vm.define "r2" do |r2|
-    r2.vm.box = "ubuntu/bionic64"
-    r2.vm.hostname = "r2"
-    # Interface cœur réseau
-    r2.vm.network "private_network", ip: "192.168.10.12", virtualbox__intnet: "net-core"
-    # Interface clientB
-    r2.vm.network "private_network", ip: "192.168.30.1", virtualbox__intnet: "net-clientB"
-    r2.vm.provision "shell", path: "scripts/setup_routeur2.sh"
+  # VM Routeur 2 (FRRouting + OVS)
+  config.vm.define "router2" do |router2|
+    router2.vm.hostname = "router2"
+    router2.vm.network "private_network", ip: "#{MGMT_NETWORK}.12"
+    router2.vm.network "private_network", ip: "#{DATA_NETWORK}.1.2"
+    router2.vm.network "private_network", ip: "#{DATA_NETWORK}.3.1"
+    
+    router2.vm.provider "virtualbox" do |vb|
+      vb.name = "Router-2"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+    
+    router2.vm.provision "shell", path: "scripts/install-router.sh"
   end
 
-  # Client A
-  config.vm.define "clientA" do |clientA|
-    clientA.vm.box = "ubuntu/bionic64"
-    clientA.vm.hostname = "clientA"
-    clientA.vm.network "private_network", ip: "192.168.20.10", virtualbox__intnet: "net-clientA"
-    clientA.vm.provision "shell", path: "scripts/setup_client.sh"
+  # VM Client 1
+  config.vm.define "client1" do |client1|
+    client1.vm.hostname = "client1"
+    client1.vm.network "private_network", ip: "#{MGMT_NETWORK}.21"
+    client1.vm.network "private_network", ip: "#{DATA_NETWORK}.2.10"
+    
+    # Port forwarding pour le serveur web
+    client1.vm.network "forwarded_port", guest: 80, host: 8081, host_ip: "0.0.0.0"
+    
+    client1.vm.provider "virtualbox" do |vb|
+      vb.name = "Client-1"
+      vb.memory = "512"
+      vb.cpus = 1
+    end
+    
+    client1.vm.provision "shell", path: "scripts/install-client.sh"
   end
 
-  # Client B
-  config.vm.define "clientB" do |clientB|
-    clientB.vm.box = "ubuntu/bionic64"
-    clientB.vm.hostname = "clientB"
-    clientB.vm.network "private_network", ip: "192.168.30.10", virtualbox__intnet: "net-clientB"
-    clientB.vm.provision "shell", path: "scripts/setup_client.sh"
+  # VM Client 2
+  config.vm.define "client2" do |client2|
+    client2.vm.hostname = "client2"
+    client2.vm.network "private_network", ip: "#{MGMT_NETWORK}.22"
+    client2.vm.network "private_network", ip: "#{DATA_NETWORK}.3.10"
+    
+    # Port forwarding pour le serveur web
+    client2.vm.network "forwarded_port", guest: 80, host: 8082, host_ip: "0.0.0.0"
+    
+    client2.vm.provider "virtualbox" do |vb|
+      vb.name = "Client-2"
+      vb.memory = "512"
+      vb.cpus = 1
+    end
+    
+    client2.vm.provision "shell", path: "scripts/install-client.sh"
   end
 end

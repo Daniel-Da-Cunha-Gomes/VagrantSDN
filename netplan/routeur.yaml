@@ -1,6 +1,0 @@
-network:
-  version: 2
-  ethernets:
-    eth1:
-      dhcp4: no
-      addresses: [192.168.10.11/24]  # à adapter sur r2: 192.168.10.12/24
