@@ -3,7 +3,7 @@
 ## 🎯 Objectif
 
 Cette maquette réseau automatisée déploie une infrastructure complète avec :
-- **SDN** via Open vSwitch + contrôleur Ryu
+- **SDN** via Open vSwitch + contrôleur Ryu + mininet
 - **Routage dynamique OSPF** avec FRRouting
 - **Automatisation complète** avec Vagrant
 - **Monitoring** avec Prometheus + Grafana
