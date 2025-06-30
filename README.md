@@ -216,3 +216,42 @@ vagrant destroy -f
 # Nettoyer VirtualBox
 VBoxManage list vms
 VBoxManage unregistervm "VM-Name" --delete
+
+# commande a faire a la fin pour ryu et mininet
+
+# === [1] Mettre à jour les paquets de base ===
+sudo apt update
+sudo apt install -y git curl sudo net-tools iproute2 iputils-ping ethtool \
+    python3.10 python3.10-venv python3-pip python3-setuptools \
+    openvswitch-switch openvswitch-common openvswitch-test bridge-utils tshark
+
+# === [2] Créer un environnement Python 3.9/3.10 pour Ryu ===
+python3.10 -m venv ~/ryu-env
+source ~/ryu-env/bin/activate
+pip install --upgrade pip
+
+# === [3] Cloner le dépôt Ryu ===
+cd ~
+git clone https://github.com/faucetsdn/ryu.git
+cd ryu
+pip install -e .
+
+# === [4] Vérifier que Ryu fonctionne ===
+ryu-manager ryu/app/simple_switch_13.py
+
+# === [5] Cloner et installer Mininet ===
+cd ~
+git clone https://github.com/mininet/mininet.git
+cd mininet
+sudo util/install.sh -a
+
+# === [6] Test de Mininet seul ===
+sudo mn --test pingall
+
+# === [7] Lancer Ryu et Mininet ensemble ===
+# (Terminal 1 - Ryu)
+source ~/ryu-env/bin/activate
+ryu-manager /opt/ryu/apps/simple_switch_13.py
+
+# (Terminal 2 - Mininet)
+sudo mn --controller=remote,ip=127.0.0.1,port=6653 --topo=single,3 --switch ovs,protocols=OpenFlow13
