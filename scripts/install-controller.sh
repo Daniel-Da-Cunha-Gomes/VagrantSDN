@@ -2,7 +2,7 @@
 
 set -e
 
-echo "=== Installation du contrôleur SDN (Ryu) - VERSION CORRIGÉE ==="
+echo "=== Installation du contrôleur SDN (Ryu) ==="
 
 # Mise à jour du système
 apt-get update
@@ -26,20 +26,8 @@ apt-get install -y \
 # Désactiver le firewall pour les tests
 ufw --force disable
 
-# CORRECTION : Installation de versions compatibles
-echo "=== Installation de Ryu avec versions compatibles ==="
-
-# Désinstaller les versions incompatibles
-pip3 uninstall -y ryu eventlet webob routes || true
-
-# Installer des versions compatibles spécifiques
-pip3 install --upgrade pip
-pip3 install eventlet==0.33.3  # Version compatible avec Ryu
-pip3 install webob==1.8.7
-pip3 install routes==2.5.1
-pip3 install ryu==4.34
-
-echo "=== Installation de Prometheus ==="
+# Installation de Ryu avec les dépendances web
+pip3 install ryu eventlet webob routes
 
 # Installation de Prometheus
 useradd --no-create-home --shell /bin/false prometheus || true
@@ -58,13 +46,14 @@ cp -r prometheus-2.40.0.linux-amd64/consoles /etc/prometheus/
 cp -r prometheus-2.40.0.linux-amd64/console_libraries /etc/prometheus/
 chown -R prometheus:prometheus /etc/prometheus/consoles /etc/prometheus/console_libraries
 
-# Configuration Prometheus
+# Configuration Prometheus avec tous les exporters
 cat > /etc/prometheus/prometheus.yml << 'EOF'
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
 rule_files:
+  # - "first_rules.yml"
 
 scrape_configs:
   - job_name: 'prometheus'
@@ -119,9 +108,7 @@ ExecStart=/usr/local/bin/prometheus \
 WantedBy=multi-user.target
 EOF
 
-echo "=== Installation de Node Exporter ==="
-
-# Installation de Node Exporter
+# Installation de Node Exporter pour le contrôleur
 cd /tmp
 wget -q https://github.com/prometheus/node_exporter/releases/download/v1.6.0/node_exporter-1.6.0.linux-amd64.tar.gz
 tar xf node_exporter-1.6.0.linux-amd64.tar.gz
@@ -145,8 +132,6 @@ ExecStart=/usr/local/bin/node_exporter --web.listen-address=0.0.0.0:9100
 WantedBy=multi-user.target
 EOF
 
-echo "=== Installation de Grafana ==="
-
 # Installation de Grafana
 apt-get install -y software-properties-common
 wget -q -O - https://packages.grafana.com/gpg.key | apt-key add -
@@ -168,14 +153,87 @@ admin_password = admin
 
 [auth.anonymous]
 enabled = false
+
+[dashboards]
+default_home_dashboard_path = /var/lib/grafana/dashboards/network-overview.json
 EOF
 
-echo "=== Configuration des applications Ryu ==="
+# Créer le répertoire des dashboards
+mkdir -p /var/lib/grafana/dashboards
+chown -R grafana:grafana /var/lib/grafana/dashboards
+
+# Dashboard réseau personnalisé
+cat > /var/lib/grafana/dashboards/network-overview.json << 'EOF'
+{
+  "dashboard": {
+    "id": null,
+    "title": "SDN Network Overview",
+    "tags": ["sdn", "network"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Network Nodes Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up",
+            "legendFormat": "{{instance}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "{{instance}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "legendFormat": "{{instance}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Network Traffic",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(node_network_receive_bytes_total[5m])",
+            "legendFormat": "RX {{instance}} {{device}}"
+          },
+          {
+            "expr": "rate(node_network_transmit_bytes_total[5m])",
+            "legendFormat": "TX {{instance}} {{device}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "5s"
+  }
+}
+EOF
 
 # Configuration des applications Ryu
 mkdir -p /opt/ryu/apps
 
-# Application Ryu simple et fonctionnelle
+# Application Ryu avec interface web
 cat > /opt/ryu/apps/sdn_controller.py << 'EOF'
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -189,19 +247,21 @@ from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from webob import Response
 import json
 
-simple_switch_instance_name = 'simple_switch_api_app'
-url = '/simpleswitch'
+sdn_instance_name = 'sdn_api_app'
+url = '/sdn'
 
-class SimpleSwitch13(app_manager.RyuApp):
+class SDNController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {'wsgi': WSGIApplication}
 
     def __init__(self, *args, **kwargs):
-        super(SimpleSwitch13, self).__init__(*args, **kwargs)
+        super(SDNController, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.switches = {}
+        self.flows = {}
+        
         wsgi = kwargs['wsgi']
-        wsgi.register(SimpleSwitchController, {simple_switch_instance_name: self})
+        wsgi.register(SDNRestAPI, {sdn_instance_name: self})
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -209,25 +269,27 @@ class SimpleSwitch13(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         
-        # Store switch info
-        self.switches[datapath.id] = datapath
+        # Enregistrer le switch
+        self.switches[datapath.id] = {
+            'datapath': datapath,
+            'ports': {}
+        }
 
+        # Règle par défaut
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
-        self.logger.info("Switch %s connected", datapath.id)
+        self.logger.info("Switch %s connecté", datapath.id)
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                             actions)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
-                                    priority=priority, match=match,
-                                    instructions=inst)
+                                    priority=priority, match=match, instructions=inst)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                     match=match, instructions=inst)
@@ -246,10 +308,11 @@ class SimpleSwitch13(app_manager.RyuApp):
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
+
         dst = eth.dst
         src = eth.src
-
         dpid = datapath.id
+        
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src] = in_port
 
@@ -267,6 +330,7 @@ class SimpleSwitch13(app_manager.RyuApp):
                 return
             else:
                 self.add_flow(datapath, 1, match, actions)
+
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
@@ -275,50 +339,59 @@ class SimpleSwitch13(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
-class SimpleSwitchController(ControllerBase):
-
+class SDNRestAPI(ControllerBase):
     def __init__(self, req, link, data, **config):
-        super(SimpleSwitchController, self).__init__(req, link, data, **config)
-        self.simple_switch_app = data[simple_switch_instance_name]
+        super(SDNRestAPI, self).__init__(req, link, data, **config)
+        self.sdn_app = data[sdn_instance_name]
 
-    @route('simpleswitch', url + '/mactable/{dpid}', methods=['GET'])
-    def list_mac_table(self, req, **kwargs):
-        simple_switch = self.simple_switch_app
-        dpid = int(kwargs['dpid'])
-        
-        if dpid not in simple_switch.mac_to_port:
-            return Response(status=404)
-
-        mac_table = simple_switch.mac_to_port.get(dpid, {})
-        body = json.dumps(mac_table)
-        return Response(content_type='application/json', body=body)
-
-    @route('simpleswitch', url + '/switches', methods=['GET'])
+    @route('sdn', url + '/switches', methods=['GET'])
     def list_switches(self, req, **kwargs):
-        simple_switch = self.simple_switch_app
-        switches = list(simple_switch.switches.keys())
-        body = json.dumps(switches)
+        switches = list(self.sdn_app.switches.keys())
+        body = json.dumps({'switches': switches})
         return Response(content_type='application/json', body=body)
 
-    @route('simpleswitch', '/', methods=['GET'])
+    @route('sdn', url + '/flows/{dpid}', methods=['GET'])
+    def get_flows(self, req, **kwargs):
+        dpid = int(kwargs['dpid'])
+        flows = self.sdn_app.flows.get(dpid, [])
+        body = json.dumps({'flows': flows})
+        return Response(content_type='application/json', body=body)
+
+    @route('sdn', url + '/stats', methods=['GET'])
+    def get_stats(self, req, **kwargs):
+        stats = {
+            'switches_count': len(self.sdn_app.switches),
+            'mac_table_size': sum(len(table) for table in self.sdn_app.mac_to_port.values())
+        }
+        body = json.dumps(stats)
+        return Response(content_type='application/json', body=body)
+EOF
+
+# Interface web simple pour Ryu
+cat > /opt/ryu/apps/web_interface.py << 'EOF'
+from ryu.app.wsgi import ControllerBase, WSGIApplication, route
+from webob import Response
+import json
+
+web_instance_name = 'web_api_app'
+
+class WebInterface(ControllerBase):
+    def __init__(self, req, link, data, **config):
+        super(WebInterface, self).__init__(req, link, data, **config)
+
+    @route('web', '/', methods=['GET'])
     def index(self, req, **kwargs):
-        simple_switch = self.simple_switch_app
-        html = f'''
+        html = '''
         <!DOCTYPE html>
         <html>
         <head>
             <title>Ryu SDN Controller</title>
             <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
-                .container {{ max-width: 800px; margin: 0 auto; }}
-                .card {{ background: white; border: 1px solid #ddd; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                .status {{ color: #28a745; font-weight: bold; }}
-                h1 {{ text-align: center; color: #333; }}
-                .btn {{ background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin: 5px; }}
-                .btn:hover {{ background: #0056b3; }}
-                ul {{ list-style-type: none; padding: 0; }}
-                li {{ padding: 8px 0; border-bottom: 1px solid #eee; }}
-                a {{ color: #007bff; text-decoration: none; }}
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .container { max-width: 800px; margin: 0 auto; }
+                .card { border: 1px solid #ddd; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 3px; }
+                .status { color: green; font-weight: bold; }
             </style>
         </head>
         <body>
@@ -327,22 +400,22 @@ class SimpleSwitchController(ControllerBase):
                 <div class="card">
                     <h2>Status</h2>
                     <p class="status">✅ Controller Active</p>
-                    <p><strong>OpenFlow Port:</strong> 6633</p>
-                    <p><strong>REST API Port:</strong> 8080</p>
-                    <p><strong>Switches connectés:</strong> {len(simple_switch.switches)}</p>
-                    <p><strong>Entrées MAC:</strong> {sum(len(table) for table in simple_switch.mac_to_port.values())}</p>
+                    <p>OpenFlow Port: 6633</p>
+                    <p>REST API Port: 8080</p>
                 </div>
                 <div class="card">
                     <h2>API Endpoints</h2>
                     <ul>
-                        <li><a href="/simpleswitch/switches">/simpleswitch/switches</a> - Liste des switches</li>
-                        <li><a href="/simpleswitch/mactable/1">/simpleswitch/mactable/1</a> - Table MAC switch 1</li>
+                        <li><a href="/sdn/switches">/sdn/switches</a> - Liste des switches</li>
+                        <li><a href="/sdn/stats">/sdn/stats</a> - Statistiques</li>
+                        <li><a href="/stats/switches">/stats/switches</a> - Stats switches (REST API)</li>
+                        <li><a href="/stats/flows">/stats/flows</a> - Stats flows (REST API)</li>
                     </ul>
                 </div>
                 <div class="card">
                     <h2>Monitoring</h2>
-                    <a href="http://{req.host.split(':')[0]}:9090" class="btn" target="_blank">📊 Prometheus</a>
-                    <a href="http://{req.host.split(':')[0]}:3000" class="btn" target="_blank">📈 Grafana</a>
+                    <p><a href="http://localhost:9090" class="btn">Prometheus</a></p>
+                    <p><a href="http://localhost:3000" class="btn">Grafana</a></p>
                 </div>
             </div>
         </body>
@@ -351,7 +424,7 @@ class SimpleSwitchController(ControllerBase):
         return Response(content_type='text/html', body=html)
 EOF
 
-# Service Ryu corrigé
+# Service Ryu avec interface web
 cat > /etc/systemd/system/ryu.service << 'EOF'
 [Unit]
 Description=Ryu SDN Controller
@@ -361,24 +434,20 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/ryu
-ExecStart=/usr/local/bin/ryu-manager --ofp-tcp-listen-port 6633 --wsapi-host 0.0.0.0 --wsapi-port 8080 --verbose /opt/ryu/apps/sdn_controller.py
+ExecStart=/usr/local/bin/ryu-manager /opt/ryu/apps/sdn_controller.py /opt/ryu/apps/web_interface.py --ofp-tcp-listen-port 6633 --wsapi-host 0.0.0.0 --wsapi-port 8080
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-echo "=== Activation et démarrage des services ==="
-
 # Activation des services
 systemctl daemon-reload
-systemctl enable ryu
 systemctl enable prometheus
 systemctl enable node_exporter
 systemctl enable grafana-server
+systemctl enable ryu
 
 # Démarrage des services
 systemctl start node_exporter
@@ -401,43 +470,21 @@ curl -X POST \
     "isDefault": true
   }' 2>/dev/null || echo "Datasource déjà configurée"
 
-echo "=== Vérifications finales ==="
-
-# Test rapide de compatibilité
-echo "Test de compatibilité eventlet..."
-python3 -c "
-try:
-    import ryu.app.wsgi
-    print('✅ Ryu WSGI fonctionne')
-except Exception as e:
-    print(f'❌ Erreur: {e}')
-"
-
 # Vérifier le statut des services
-echo ""
-echo "Statut des services:"
-systemctl is-active ryu && echo "✅ ryu: ACTIF" || echo "❌ ryu: INACTIF"
-systemctl is-active prometheus && echo "✅ Prometheus: ACTIF" || echo "❌ Prometheus: INACTIF"
-systemctl is-active node_exporter && echo "✅ Node Exporter: ACTIF" || echo "❌ Node Exporter: INACTIF"
-systemctl is-active grafana-server && echo "✅ Grafana: ACTIF" || echo "❌ Grafana: INACTIF"
-
-# Afficher les détails si Ryu ne fonctionne pas
-if ! systemctl is-active --quiet ryu; then
-    echo ""
-    echo "=== Détails du service Ryu ==="
-    systemctl status ryu --no-pager
-    echo ""
-    echo "=== Logs récents ==="
-    journalctl -u ryu --no-pager -n 10
-fi
+echo "=== Statut des services ==="
+systemctl is-active prometheus && echo "✓ Prometheus actif" || echo "✗ Prometheus inactif"
+systemctl is-active node_exporter && echo "✓ Node Exporter actif" || echo "✗ Node Exporter inactif"
+systemctl is-active grafana-server && echo "✓ Grafana actif" || echo "✗ Grafana inactif"
+systemctl is-active ryu && echo "✓ Ryu actif" || echo "✗ Ryu inactif"
 
 # Afficher les ports en écoute
-echo ""
 echo "=== Ports en écoute ==="
-netstat -tlnp | grep -E ':(3000|8080|9090|9100|6633)' || echo "Aucun port trouvé"
+netstat -tlnp | grep -E ':(3000|8080|9090|9100|6633)'
 
-echo ""
 echo "=== Installation terminée ==="
-echo "🌐 Ryu Web Interface: http://localhost:8080"
-echo "📊 Prometheus: http://localhost:9090"
-echo "📈 Grafana: http://localhost:3000 (admin/admin)"
+echo "Accès depuis votre machine physique :"
+echo "Ryu Web Interface: http://localhost:8080"
+echo "Prometheus: http://localhost:9090"
+echo "Grafana: http://localhost:3000 (admin/admin)"
+echo "Client1 Web: http://localhost:8081"
+echo "Client2 Web: http://localhost:8082"
